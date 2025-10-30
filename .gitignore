@@ -1,0 +1,84 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Logs
+*.log
+logs/
+
+# DXF test files
+*.dxf
+*.dwg
+!examples/*.dxf
+
+# IFC output files
+*.ifc
+output/
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Documentation build
+docs/_build/
+
+# Environment variables
+.env
+.env.local
+
+# Claude Code settings (personal)
+.claude/
+
+# Project specific
+samples/
+scratch/
+temp/
+test_exports/
+archive/
+
+# Large Revit project files
+Terminal 1 RVT/
+Terminal 1 RVT Clean/

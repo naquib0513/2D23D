@@ -1,0 +1,81 @@
+{
+  "$schema": "https://2d23d.org/schemas/config-v1.json",
+  "template_name": "singapore_bca_2024",
+  "description": "Singapore Building and Construction Authority (BCA) standard layer conventions (2024)",
+  "region": "Singapore",
+  "standard": "BCA",
+  "version": "1.0.0",
+
+  "layer_mappings": {
+    "grid": {
+      "patterns": ["A-GRID", "S-GRID", "GRID", "AXIS"],
+      "element_type": "grid_line",
+      "description": "Structural grid lines"
+    },
+    "wall": {
+      "patterns": ["A-WALL", "WALL", "A-WALL-FULL", "A-WALL-PART"],
+      "element_type": "wall",
+      "description": "Architectural walls"
+    },
+    "structural_wall": {
+      "patterns": ["S-WALL", "S-CONC-WALL"],
+      "element_type": "wall",
+      "structural": true,
+      "description": "Structural walls"
+    },
+    "column": {
+      "patterns": ["S-COLS", "S-COLUMN", "A-COLS"],
+      "element_type": "column",
+      "description": "Structural columns"
+    },
+    "door": {
+      "patterns": ["A-DOOR", "DOOR"],
+      "element_type": "door",
+      "description": "Doors"
+    },
+    "window": {
+      "patterns": ["A-GLAZ", "A-WIND", "WINDOW"],
+      "element_type": "window",
+      "description": "Windows and glazing"
+    },
+    "slab": {
+      "patterns": ["S-SLAB", "A-FLOR"],
+      "element_type": "slab",
+      "description": "Floor slabs"
+    }
+  },
+
+  "generation_settings": {
+    "default_wall_height": 3000,
+    "default_wall_thickness": 150,
+    "default_column_size": 300,
+    "default_slab_thickness": 150,
+    "units": "mm"
+  },
+
+  "grid_detection": {
+    "min_line_length": 1000,
+    "angle_tolerance": 0.087,
+    "spacing_tolerance": 0.15,
+    "min_grid_lines": 2
+  },
+
+  "confidence_thresholds": {
+    "grid_detection": 0.7,
+    "wall_classification": 0.6,
+    "element_placement": 0.5
+  },
+
+  "compliance_rules": {
+    "reference": "Singapore Fire Safety Code 2018",
+    "fire_egress": {
+      "max_travel_distance_m": 45,
+      "min_exit_width_mm": 1000
+    },
+    "fire_sprinklers": {
+      "required_when": "area > 280 sqm",
+      "coverage_sqm": 12.0,
+      "grid_spacing_m": 3.6
+    }
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "name": "AIA CAD Layer Standards (Malaysian Terminal 1)",
+  "description": "Layer mapping configuration for Revit exports following AIA naming conventions",
+  "version": "1.0",
+
+  "layer_mapping": {
+    "grid": {
+      "patterns": ["S-GRID", "*GRID*"],
+      "description": "Structural grid lines"
+    },
+
+    "columns": {
+      "patterns": ["A-COLS", "S-COLS", "*COL*"],
+      "description": "Column elements"
+    },
+
+    "walls": {
+      "patterns": ["A-WALL", "A-WALL-*", "*WALL*"],
+      "exclude": ["*PATT*", "*DEMO*"],
+      "description": "Wall centerlines and boundaries"
+    },
+
+    "doors": {
+      "patterns": ["A-DOOR", "A-DOOR-*"],
+      "description": "Door elements"
+    },
+
+    "windows": {
+      "patterns": ["A-GLAZ", "A-WINDOW*"],
+      "description": "Window and glazing elements"
+    },
+
+    "slabs": {
+      "patterns": ["A-FLOR", "S-SLAB*"],
+      "description": "Floor slabs"
+    },
+
+    "stairs": {
+      "patterns": ["A-STAIR*"],
+      "description": "Stair elements"
+    }
+  },
+
+  "classification_rules": {
+    "wall_detection": {
+      "min_length_mm": 200,
+      "default_thickness_mm": 150,
+      "default_height_mm": 3000,
+      "confidence_threshold": 0.5
+    },
+
+    "column_detection": {
+      "default_width_mm": 300,
+      "default_depth_mm": 300,
+      "default_height_mm": 3000,
+      "confidence_threshold": 0.7,
+      "use_grid_intersections": false,
+      "use_explicit_entities": true
+    },
+
+    "slab_detection": {
+      "default_thickness_mm": 200,
+      "confidence_threshold": 0.8
+    }
+  },
+
+  "geometry_defaults": {
+    "units": "millimeters",
+    "floor_to_floor_height_mm": 4000,
+    "default_wall_thickness_mm": 150,
+    "default_column_size_mm": 300,
+    "default_slab_thickness_mm": 200
+  }
+}
