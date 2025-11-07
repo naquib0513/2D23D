@@ -29,6 +29,8 @@ from d23d.core.models import (
     Point2D,
     Point3D,
 )
+from d23d.detection.beam_detector import Beam
+from d23d.detection.foundation_detector import Foundation
 
 
 class IFCGenerator:
@@ -54,9 +56,14 @@ class IFCGenerator:
         self.storey = None
         self.owner_history = None
 
-    def create_project(self) -> ifcopenshell.file:
+    def create_project(self, create_default_storey: bool = True) -> ifcopenshell.file:
         """
         Create new IFC4 project structure.
+
+        Args:
+            create_default_storey: If True, creates a default "Ground Floor" storey.
+                                   Set to False for multi-storey projects where storeys
+                                   will be added explicitly via add_storey().
 
         Returns:
             IfcOpenShell file object
@@ -104,12 +111,17 @@ class IFCGenerator:
             name="Building",
         )
 
-        self.storey = ifcopenshell.api.run(
-            "root.create_entity",
-            self.ifc_file,
-            ifc_class="IfcBuildingStorey",
-            name="Ground Floor",
-        )
+        # Create default storey only if requested (for single-floor projects)
+        if create_default_storey:
+            self.storey = ifcopenshell.api.run(
+                "root.create_entity",
+                self.ifc_file,
+                ifc_class="IfcBuildingStorey",
+                name="Ground Floor",
+            )
+        else:
+            # For multi-storey projects, storey will be set via add_storey()
+            self.storey = None
 
         # Assign spatial relationships
         ifcopenshell.api.run(
@@ -126,16 +138,52 @@ class IFCGenerator:
             products=[self.building],
         )
 
-        ifcopenshell.api.run(
-            "aggregate.assign_object",
-            self.ifc_file,
-            relating_object=self.building,
-            products=[self.storey],
-        )
+        # Assign default storey to building if created
+        if create_default_storey and self.storey:
+            ifcopenshell.api.run(
+                "aggregate.assign_object",
+                self.ifc_file,
+                relating_object=self.building,
+                products=[self.storey],
+            )
 
         logger.success("Created IFC project structure")
 
         return self.ifc_file
+
+    def add_storey(self, name: str, elevation_m: float):
+        """
+        Add a building storey at specified elevation.
+        
+        Args:
+            name: Storey name (e.g., "Level 1")
+            elevation_m: Elevation in meters
+            
+        Returns:
+            The created IfcBuildingStorey
+        """
+        if not self.ifc_file or not self.building:
+            raise RuntimeError("Project not created")
+        
+        storey = ifcopenshell.api.run(
+            "root.create_entity",
+            self.ifc_file,
+            ifc_class="IfcBuildingStorey",
+            name=name,
+        )
+        storey.Elevation = elevation_m
+        
+        # Assign to building
+        ifcopenshell.api.run(
+            "aggregate.assign_object",
+            self.ifc_file,
+            relating_object=self.building,
+            products=[storey],
+        )
+        
+        # Update self.storey for backwards compatibility
+        self.storey = storey
+        return storey
 
     def add_grid(self, grid: BuildingGrid) -> None:
         """
@@ -187,6 +235,10 @@ class IFCGenerator:
                 name=f"Column {column.grid_reference or column.guid[:8]}",
             )
 
+            # Set predefined type (COLUMN for structural columns)
+            if hasattr(column, 'predefined_type') and column.predefined_type:
+                ifc_column.PredefinedType = column.predefined_type
+
             # Set placement (convert mm to meters)
             # Get floor elevation from metadata, default to 0
             floor_elevation_mm = column.metadata.get("floor_elevation_mm", 0.0)
@@ -218,6 +270,91 @@ class IFCGenerator:
             self._add_provisional_pset(ifc_column, column)
 
         logger.success(f"Added {len(columns)} columns")
+
+    def add_beams(self, beams: List[Beam]) -> None:
+        """
+        Add beams to IFC model.
+
+        Args:
+            beams: List of Beam objects
+        """
+        logger.info(f"Adding {len(beams)} beams to IFC model")
+
+        if not self.ifc_file or not self.storey:
+            raise RuntimeError("Project not created. Call create_project() first.")
+
+        for beam in beams:
+            # Create IfcBeam
+            ifc_beam = ifcopenshell.api.run(
+                "root.create_entity",
+                self.ifc_file,
+                ifc_class="IfcBeam",
+                name=f"Beam {beam.guid[:8]}",
+            )
+
+            # Set predefined type (BEAM for structural beams)
+            if hasattr(beam, 'predefined_type') and beam.predefined_type:
+                ifc_beam.PredefinedType = beam.predefined_type
+
+            # Calculate beam midpoint and direction
+            start_x, start_y = beam.start.x, beam.start.y
+            end_x, end_y = beam.end.x, beam.end.y
+            mid_x = (start_x + end_x) / 2.0
+            mid_y = (start_y + end_y) / 2.0
+
+            # Calculate beam length
+            import math
+            length_mm = math.sqrt((end_x - start_x)**2 + (end_y - start_y)**2)
+
+            # Calculate rotation angle (beam orientation)
+            angle = math.atan2(end_y - start_y, end_x - start_x)
+
+            # Get floor elevation from metadata, default to 0
+            floor_elevation_mm = beam.metadata.get("floor_elevation_mm", 0.0)
+
+            # Get column height (floor-to-floor) - beams go at ceiling/column top
+            # Beam elevation should be at ceiling, not ground
+            # If beam.elevation is set, use it; otherwise use floor-to-floor height
+            if beam.elevation > 0:
+                beam_z_mm = floor_elevation_mm + beam.elevation
+            else:
+                # Default: place at typical ceiling height (use column height if available)
+                # For ground floor: ~8000mm (8m) ceiling
+                beam_z_mm = floor_elevation_mm + 8000.0  # Will be refined later with actual column height
+
+            # Set placement at beam midpoint
+            # Beam is placed at its center, then rotated
+            cos_a = math.cos(angle)
+            sin_a = math.sin(angle)
+
+            matrix = [
+                [cos_a, -sin_a, 0.0, mid_x / 1000.0],
+                [sin_a, cos_a, 0.0, mid_y / 1000.0],
+                [0.0, 0.0, 1.0, beam_z_mm / 1000.0],  # Place at ceiling height
+            ]
+
+            ifcopenshell.api.run(
+                "geometry.edit_object_placement",
+                self.ifc_file,
+                product=ifc_beam,
+                matrix=matrix,
+            )
+
+            # Create beam geometry (rectangular profile extruded along length)
+            self._add_beam_geometry(ifc_beam, beam, length_mm)
+
+            # Assign to storey
+            ifcopenshell.api.run(
+                "spatial.assign_container",
+                self.ifc_file,
+                relating_structure=self.storey,
+                products=[ifc_beam],
+            )
+
+            # Add provisional metadata
+            self._add_provisional_pset(ifc_beam, beam)
+
+        logger.success(f"Added {len(beams)} beams")
 
     def add_walls(self, walls: List[Wall]) -> None:
         """
@@ -306,6 +443,15 @@ class IFCGenerator:
                 name=f"Slab {slab.guid[:8]}",
             )
 
+            # Set slab type based on slab_type attribute
+            if hasattr(slab, 'slab_type'):
+                if slab.slab_type == 'STRUCTURAL':
+                    ifc_slab.PredefinedType = "FLOOR"
+                    ifc_slab.Name = f"Structural Floor Slab"
+                elif slab.slab_type == 'FINISH':
+                    ifc_slab.PredefinedType = "FLOOR"
+                    ifc_slab.Name = f"Floor Finish - {slab.material_name if hasattr(slab, 'material_name') else 'Unknown'}"
+
             # Set placement (convert mm to meters)
             matrix = [
                 [1.0, 0.0, 0.0, 0.0],
@@ -335,6 +481,184 @@ class IFCGenerator:
             self._add_provisional_pset(ifc_slab, slab)
 
         logger.success(f"Added {len(slabs)} slabs")
+
+    def add_foundations(self, foundations: List[Foundation]) -> None:
+        """
+        Add foundation elements (pile caps) to IFC model as IfcSlab/BASESLAB.
+
+        Args:
+            foundations: List of Foundation objects
+        """
+        logger.info(f"Adding {len(foundations)} foundations to IFC model")
+
+        if not self.ifc_file or not self.storey:
+            raise RuntimeError("Project not created. Call create_project() first")
+
+        for foundation in foundations:
+            # Create IfcSlab with BASESLAB predefined type
+            ifc_foundation = ifcopenshell.api.run(
+                "root.create_entity",
+                self.ifc_file,
+                ifc_class="IfcSlab",
+                name=f"Foundation Pile Cap {foundation.guid[:8]}",
+            )
+
+            # CRITICAL: Set predefined type
+            ifc_foundation.PredefinedType = "BASESLAB"
+
+            # Set placement at foundation center (convert mm to meters)
+            # Foundations are placed at ground level (storey elevation)
+            matrix = [
+                [1.0, 0.0, 0.0, foundation.center.x / 1000.0],
+                [0.0, 1.0, 0.0, foundation.center.y / 1000.0],
+                [0.0, 0.0, 1.0, 0.0],  # At storey level
+            ]
+
+            ifcopenshell.api.run(
+                "geometry.edit_object_placement",
+                self.ifc_file,
+                product=ifc_foundation,
+                matrix=matrix,
+            )
+
+            # Create foundation geometry (vertical extrusion DOWNWARD)
+            self._add_foundation_geometry(ifc_foundation, foundation)
+
+            # Assign to storey
+            ifcopenshell.api.run(
+                "spatial.assign_container",
+                self.ifc_file,
+                relating_structure=self.storey,
+                products=[ifc_foundation],
+            )
+
+            # Add provisional metadata
+            self._add_provisional_pset(ifc_foundation, foundation)
+
+        logger.success(f"Added {len(foundations)} foundations")
+
+    def add_doors(self, doors: List) -> None:
+        """
+        Add doors to IFC model.
+
+        Args:
+            doors: List of Door objects
+        """
+        from d23d.core.models import Door
+
+        logger.info(f"Adding {len(doors)} doors to IFC model")
+
+        if not self.ifc_file or not self.storey:
+            raise RuntimeError("Project not created. Call create_project() first.")
+
+        for door in doors:
+            # Create IfcDoor
+            ifc_door = ifcopenshell.api.run(
+                "root.create_entity",
+                self.ifc_file,
+                ifc_class="IfcDoor",
+                name=f"Door {door.block_name or door.guid[:8]}",
+            )
+
+            # Get floor elevation from metadata
+            floor_elevation_mm = door.metadata.get("floor_elevation_mm", 0.0)
+
+            # Set placement (convert mm to meters)
+            import math
+            cos_a = math.cos(door.rotation)
+            sin_a = math.sin(door.rotation)
+
+            matrix = [
+                [cos_a, -sin_a, 0.0, door.location.x / 1000.0],
+                [sin_a,  cos_a, 0.0, door.location.y / 1000.0],
+                [0.0,    0.0,   1.0, floor_elevation_mm / 1000.0],
+            ]
+
+            ifcopenshell.api.run(
+                "geometry.edit_object_placement",
+                self.ifc_file,
+                product=ifc_door,
+                matrix=matrix,
+            )
+
+            # Create simple door geometry (rectangle)
+            self._add_door_geometry(ifc_door, door)
+
+            # Assign to storey
+            ifcopenshell.api.run(
+                "spatial.assign_container",
+                self.ifc_file,
+                relating_structure=self.storey,
+                products=[ifc_door],
+            )
+
+            # Add provisional metadata
+            self._add_provisional_pset(ifc_door, door)
+
+        logger.success(f"Added {len(doors)} doors")
+
+    def add_windows(self, windows: List) -> None:
+        """
+        Add windows to IFC model.
+
+        Args:
+            windows: List of Window objects
+        """
+        from d23d.core.models import Window
+
+        logger.info(f"Adding {len(windows)} windows to IFC model")
+
+        if not self.ifc_file or not self.storey:
+            raise RuntimeError("Project not created. Call create_project() first.")
+
+        for window in windows:
+            # Create IfcWindow
+            ifc_window = ifcopenshell.api.run(
+                "root.create_entity",
+                self.ifc_file,
+                ifc_class="IfcWindow",
+                name=f"Window {window.block_name or window.guid[:8]}",
+            )
+
+            # Get floor elevation from metadata
+            floor_elevation_mm = window.metadata.get("floor_elevation_mm", 0.0)
+
+            # Set placement (convert mm to meters)
+            # Windows are placed at sill height above floor
+            import math
+            cos_a = math.cos(window.rotation)
+            sin_a = math.sin(window.rotation)
+
+            window_z = (floor_elevation_mm + window.sill_height) / 1000.0
+
+            matrix = [
+                [cos_a, -sin_a, 0.0, window.location.x / 1000.0],
+                [sin_a,  cos_a, 0.0, window.location.y / 1000.0],
+                [0.0,    0.0,   1.0, window_z],
+            ]
+
+            ifcopenshell.api.run(
+                "geometry.edit_object_placement",
+                self.ifc_file,
+                product=ifc_window,
+                matrix=matrix,
+            )
+
+            # Create simple window geometry (rectangle)
+            self._add_window_geometry(ifc_window, window)
+
+            # Assign to storey
+            ifcopenshell.api.run(
+                "spatial.assign_container",
+                self.ifc_file,
+                relating_structure=self.storey,
+                products=[ifc_window],
+            )
+
+            # Add provisional metadata
+            self._add_provisional_pset(ifc_window, window)
+
+        logger.success(f"Added {len(windows)} windows")
 
     def _add_provisional_pset(self, ifc_element, element) -> None:
         """
@@ -399,6 +723,73 @@ class IFCGenerator:
                 profile=profile,
                 depth=column.height / 1000.0,  # Convert mm to meters
             ),
+        )
+
+    def _add_beam_geometry(self, ifc_beam, beam: Beam, length_mm: float) -> None:
+        """
+        Add 3D geometry to beam (rectangular profile extruded along length).
+
+        Beams are extruded horizontally along their length (X-axis), not vertically.
+        The beam's cross-section (width x depth) is in the YZ plane, and it extends along X.
+
+        Args:
+            ifc_beam: IFC beam entity
+            beam: Beam data model
+            length_mm: Beam length in mm
+        """
+        # Convert dimensions to meters
+        width_m = beam.width / 1000.0  # Beam width (horizontal, in Y direction)
+        depth_m = beam.depth / 1000.0  # Beam depth (vertical, in Z direction)
+        length_m = length_mm / 1000.0  # Beam length (along X direction)
+
+        # Create rectangular profile for beam cross-section in YZ plane
+        # Profile is centered at origin, facing along X-axis
+        profile = self.ifc_file.createIfcRectangleProfileDef(
+            "AREA",      # Profile type
+            None,        # Profile name
+            None,        # Position (will use placement below)
+            width_m,     # XDim - beam width (horizontal, maps to Y in final orientation)
+            depth_m      # YDim - beam depth (vertical, maps to Z in final orientation)
+        )
+
+        # Extrude along positive X-axis (horizontally along beam length)
+        # This is different from columns/walls which extrude along Z (vertically)
+        extrusion_direction = self.ifc_file.createIfcDirection((1.0, 0.0, 0.0))
+
+        # Placement: profile in YZ plane at origin, extrude along +X
+        # Z-axis points up (beam depth direction)
+        # X-axis points along beam length (extrusion direction)
+        placement = self.ifc_file.createIfcAxis2Placement3D(
+            self.ifc_file.createIfcCartesianPoint((0.0, 0.0, 0.0)),
+            self.ifc_file.createIfcDirection((1.0, 0.0, 0.0)),  # Z-axis of placement = X-axis (extrusion direction)
+            self.ifc_file.createIfcDirection((0.0, 1.0, 0.0))   # X-axis of placement = Y-axis (width direction)
+        )
+
+        # Create extruded area solid
+        extruded_solid = self.ifc_file.createIfcExtrudedAreaSolid(
+            profile,
+            placement,
+            extrusion_direction,
+            length_m,  # Extrude along beam length
+        )
+
+        # Get geometric representation context
+        context = self.ifc_file.by_type("IfcGeometricRepresentationContext")[0]
+
+        # Create shape representation
+        representation = self.ifc_file.createIfcShapeRepresentation(
+            context,
+            "Body",
+            "SweptSolid",
+            [extruded_solid],
+        )
+
+        # Assign representation to beam
+        ifcopenshell.api.run(
+            "geometry.assign_representation",
+            self.ifc_file,
+            product=ifc_beam,
+            representation=representation,
         )
 
     def _add_wall_geometry(self, ifc_wall, wall: Wall) -> None:
@@ -475,28 +866,235 @@ class IFCGenerator:
             slab: Slab data model
         """
         # Create arbitrary profile from boundary points (convert mm to meters)
-        points = [(p.x / 1000.0, p.y / 1000.0) for p in slab.boundary]
+        # Profile points are in XY plane
+        ifc_points = [
+            self.ifc_file.createIfcCartesianPoint((p.x / 1000.0, p.y / 1000.0))
+            for p in slab.boundary
+        ]
 
-        profile = ifcopenshell.api.run(
-            "profile.add_arbitrary_profile",
-            self.ifc_file,
-            profile=points,
-            name="Slab Profile",
+        # Create closed polyline for slab boundary
+        polyline = self.ifc_file.createIfcPolyline(ifc_points)
+
+        # Create arbitrary profile with outer boundary
+        profile = self.ifc_file.createIfcArbitraryClosedProfileDef(
+            "AREA",  # Profile type
+            None,    # Profile name
+            polyline
         )
 
-        # Add extruded representation
+        # Extrude upward along Z-axis to create horizontal slab
+        # The profile is in XY plane, we extrude it vertically by the thickness
+        extrusion_direction = self.ifc_file.createIfcDirection((0.0, 0.0, 1.0))
+
+        # Placement at origin with Z-axis up
+        placement = self.ifc_file.createIfcAxis2Placement3D(
+            self.ifc_file.createIfcCartesianPoint((0.0, 0.0, 0.0)),
+            self.ifc_file.createIfcDirection((0.0, 0.0, 1.0)),  # Z-axis up
+            self.ifc_file.createIfcDirection((1.0, 0.0, 0.0))   # X-axis forward
+        )
+
+        # Create extruded area solid - extrude the XY profile along Z by thickness
+        thickness_m = slab.thickness / 1000.0
+        extruded_solid = self.ifc_file.createIfcExtrudedAreaSolid(
+            profile,
+            placement,
+            extrusion_direction,
+            thickness_m,
+        )
+
+        # Get geometric representation context
+        context = self.ifc_file.by_type("IfcGeometricRepresentationContext")[0]
+
+        # Create shape representation
+        representation = self.ifc_file.createIfcShapeRepresentation(
+            context,
+            "Body",
+            "SweptSolid",
+            [extruded_solid],
+        )
+
+        # Assign representation to slab
         ifcopenshell.api.run(
             "geometry.assign_representation",
             self.ifc_file,
             product=ifc_slab,
-            representation=ifcopenshell.api.run(
-                "geometry.add_profile_representation",
-                self.ifc_file,
-                context=self.ifc_file.by_type("IfcGeometricRepresentationContext")[0],
-                profile=profile,
-                depth=slab.thickness / 1000.0,  # Convert mm to meters
-            ),
+            representation=representation,
         )
+
+    def _add_foundation_geometry(self, ifc_foundation, foundation: Foundation) -> None:
+        """
+        Add 3D geometry to foundation (pile cap) as vertical extrusion.
+
+        Foundations are square/rectangular profiles extruded DOWNWARD.
+
+        Args:
+            ifc_foundation: IFC slab entity (with BASESLAB predefined type)
+            foundation: Foundation data model
+        """
+        # Create rectangular profile for foundation (convert mm to meters)
+        width_m = foundation.width / 1000.0
+        depth_m = foundation.depth / 1000.0
+
+        # Create rectangle profile (in XY plane at origin)
+        profile = self.ifc_file.createIfcRectangleProfileDef(
+            "AREA",  # Profile type
+            None,    # Profile name
+            None,    # Position (will use placement below)
+            width_m,  # X dimension
+            depth_m   # Y dimension
+        )
+
+        # Extrude DOWNWARD along negative Z-axis (into ground)
+        extrusion_direction = self.ifc_file.createIfcDirection((0.0, 0.0, -1.0))
+
+        # Placement at origin with Z-axis down
+        placement = self.ifc_file.createIfcAxis2Placement3D(
+            self.ifc_file.createIfcCartesianPoint((0.0, 0.0, 0.0)),
+            self.ifc_file.createIfcDirection((0.0, 0.0, -1.0)),  # Z-axis down (extrusion direction)
+            self.ifc_file.createIfcDirection((1.0, 0.0, 0.0))    # X-axis forward
+        )
+
+        # Create extruded area solid - extrude profile downward by foundation depth
+        foundation_depth_m = foundation.foundation_depth / 1000.0
+        extruded_solid = self.ifc_file.createIfcExtrudedAreaSolid(
+            profile,
+            placement,
+            extrusion_direction,
+            foundation_depth_m,  # Extrusion distance (downward)
+        )
+
+        # Get geometric representation context
+        context = self.ifc_file.by_type("IfcGeometricRepresentationContext")[0]
+
+        # Create shape representation
+        representation = self.ifc_file.createIfcShapeRepresentation(
+            context,
+            "Body",
+            "SweptSolid",
+            [extruded_solid],
+        )
+
+        # Assign representation to foundation
+        ifcopenshell.api.run(
+            "geometry.assign_representation",
+            self.ifc_file,
+            product=ifc_foundation,
+            representation=representation,
+        )
+
+    def _add_door_geometry(self, ifc_door, door) -> None:
+        """
+        Add 3D geometry to door (simple rectangle).
+        Uses simple profile approach matching wall geometry pattern.
+
+        Args:
+            ifc_door: IFC door entity
+            door: Door data model
+        """
+        from d23d.core.models import Door
+
+        # Create rectangular profile for door (convert mm to meters)
+        width_m = door.width / 1000.0
+        height_m = door.height / 1000.0
+        thickness_m = 0.05  # 50mm door thickness
+
+        # Create rectangle profile in XY plane (like walls do)
+        # XDim = width, YDim = thickness
+        profile = self.ifc_file.createIfcRectangleProfileDef(
+            "AREA",
+            None,
+            None,  # No placement - default to XY plane
+            width_m,      # XDim - door width along X
+            thickness_m   # YDim - door thickness along Y
+        )
+
+        # Extrude along Z for height (same as walls)
+        extrusion_direction = self.ifc_file.createIfcDirection((0.0, 0.0, 1.0))
+
+        # Placement at origin, Z-axis up, X-axis forward (same as walls)
+        placement = self.ifc_file.createIfcAxis2Placement3D(
+            self.ifc_file.createIfcCartesianPoint((0.0, 0.0, 0.0)),
+            self.ifc_file.createIfcDirection((0.0, 0.0, 1.0)),  # Z-axis up
+            self.ifc_file.createIfcDirection((1.0, 0.0, 0.0))   # X-axis forward
+        )
+
+        # Create extruded solid
+        extruded_solid = self.ifc_file.createIfcExtrudedAreaSolid(
+            profile,
+            placement,
+            extrusion_direction,
+            height_m  # Extrude height
+        )
+
+        # Create shape representation
+        context = self.ifc_file.by_type("IfcGeometricRepresentationContext")[0]
+        shape_representation = self.ifc_file.createIfcShapeRepresentation(
+            context,
+            "Body",
+            "SweptSolid",
+            [extruded_solid]
+        )
+
+        # Assign representation
+        product_shape = self.ifc_file.createIfcProductDefinitionShape(None, None, [shape_representation])
+        ifc_door.Representation = product_shape
+
+    def _add_window_geometry(self, ifc_window, window) -> None:
+        """
+        Add 3D geometry to window (simple rectangle).
+        Uses simple profile approach matching wall geometry pattern.
+
+        Args:
+            ifc_window: IFC window entity
+            window: Window data model
+        """
+        from d23d.core.models import Window
+
+        # Create rectangular profile for window (convert mm to meters)
+        width_m = window.width / 1000.0
+        height_m = window.height / 1000.0
+        thickness_m = 0.02  # 20mm window thickness
+
+        # Create rectangle profile in XY plane (like walls do)
+        # XDim = width, YDim = thickness
+        profile = self.ifc_file.createIfcRectangleProfileDef(
+            "AREA",
+            None,
+            None,  # No placement - default to XY plane
+            width_m,      # XDim - window width along X
+            thickness_m   # YDim - window thickness along Y
+        )
+
+        # Extrude along Z for height (same as walls)
+        extrusion_direction = self.ifc_file.createIfcDirection((0.0, 0.0, 1.0))
+
+        # Placement at origin, Z-axis up, X-axis forward (same as walls)
+        placement = self.ifc_file.createIfcAxis2Placement3D(
+            self.ifc_file.createIfcCartesianPoint((0.0, 0.0, 0.0)),
+            self.ifc_file.createIfcDirection((0.0, 0.0, 1.0)),  # Z-axis up
+            self.ifc_file.createIfcDirection((1.0, 0.0, 0.0))   # X-axis forward
+        )
+
+        # Create extruded solid
+        extruded_solid = self.ifc_file.createIfcExtrudedAreaSolid(
+            profile,
+            placement,
+            extrusion_direction,
+            height_m  # Extrude height
+        )
+
+        # Create shape representation
+        context = self.ifc_file.by_type("IfcGeometricRepresentationContext")[0]
+        shape_representation = self.ifc_file.createIfcShapeRepresentation(
+            context,
+            "Body",
+            "SweptSolid",
+            [extruded_solid]
+        )
+
+        # Assign representation
+        product_shape = self.ifc_file.createIfcProductDefinitionShape(None, None, [shape_representation])
+        ifc_window.Representation = product_shape
 
     def write(self, output_path: str) -> None:
         """
