@@ -16,6 +16,8 @@ from d23d.detection.slab_detector import detect_slabs
 from d23d.detection.beam_detector import detect_beams
 from d23d.detection.foundation_detector import detect_foundations
 from d23d.detection.spatial_reference import create_spatial_reference
+from d23d.detection.column_height_detector import detect_column_heights, apply_detected_heights, get_floor_dxf_paths
+from d23d.detection.column_height_from_reference import extract_heights_from_reference_ifc, apply_reference_heights
 from d23d.generation.ifc_generator import IFCGenerator
 
 
@@ -93,31 +95,51 @@ def generate_from_structural(dxf_path: Path, output_path: Path, floor_name: str)
         print(f"  No grid detected, will use mock grid")
         spatial_ref = None
 
-    # Detect columns
+    # Detect columns with multi-floor height analysis
     print(f"[3/5] Detecting columns...")
 
-    # Determine column height from reference IFC or config
-    # TESTING: User wants to see 8m version to compare visually
-    storey_heights = get_storey_heights_from_reference()
-    if storey_heights and "GROUND FLOOR LEVEL" in storey_heights:
-        ref_height = storey_heights["GROUND FLOOR LEVEL"]
-        # TEMPORARILY USING REFERENCE HEIGHT FOR VISUAL COMPARISON
-        column_height = ref_height
-        print(f"  Using reference IFC height for comparison: {column_height:.0f}mm = {column_height/1000:.1f}m")
-    else:
-        # Fallback to config default
-        column_height = 5500.0  # mm
-        print(f"  Using config height: {column_height:.0f}mm (reference IFC not available)")
-
-    # Detect columns - pass floor_to_floor_height so detector can set heights properly
+    # First, detect columns on ground floor
     columns = detect_columns(
         parser,
         grid_system=grid,
         spatial_ref=spatial_ref,
-        floor_to_floor_height_mm=column_height
+        floor_to_floor_height_mm=8000.0  # Temporary default, will be overridden
     )
+    print(f"  Detected {len(columns)} columns on ground floor")
 
-    print(f"  Detected {len(columns)} columns (height: {column_height:.0f}mm)")
+    # Detect column heights from multi-floor DXF analysis
+    print(f"  Analyzing column heights from upper floors...")
+    dxf_dir = dxf_path.parent
+    floor_dxfs = get_floor_dxf_paths(str(dxf_dir))
+
+    # Extract floor number from filename
+    import re
+    floor_match = re.search(r'Plan - (\d{2})', dxf_path.name)
+    current_floor_num = floor_match.group(1) if floor_match else "01"
+
+    if len(floor_dxfs) > 1:
+        # We have multiple floors - use multi-floor analysis
+        ground_dxf = str(dxf_path)
+        upper_dxfs = {k: v for k, v in floor_dxfs.items() if k > current_floor_num and k <= "06"}
+
+        if upper_dxfs:
+            detected_heights = detect_column_heights(
+                ground_floor_dxf=ground_dxf,
+                upper_floor_dxfs=upper_dxfs,
+                position_tolerance=100.0
+            )
+
+            # Apply detected heights to columns
+            columns = apply_detected_heights(columns, detected_heights, default_height=16000.0)
+            print(f"  Applied multi-floor height detection")
+        else:
+            print(f"  No upper floors found, using default 16m height")
+            for col in columns:
+                col.height = 16000.0
+    else:
+        print(f"  Single floor mode, using default 16m height")
+        for col in columns:
+            col.height = 16000.0
 
     # Detect slabs (from structural drawing)
     print(f"[4/5] Detecting slabs...")
