@@ -312,24 +312,24 @@ class IFCGenerator:
             # Get floor elevation from metadata, default to 0
             floor_elevation_mm = beam.metadata.get("floor_elevation_mm", 0.0)
 
-            # Get column height (floor-to-floor) - beams go at ceiling/column top
-            # Beam elevation should be at ceiling, not ground
-            # If beam.elevation is set, use it; otherwise use floor-to-floor height
+            # Beams are placed at ground/floor level (Z=0 for ground floor)
+            # NOT at ceiling - the beam extrudes upward from ground level
+            # If beam.elevation is set, use it; otherwise use floor elevation
             if beam.elevation > 0:
                 beam_z_mm = floor_elevation_mm + beam.elevation
             else:
-                # Default: place at typical ceiling height (use column height if available)
-                # For ground floor: ~8000mm (8m) ceiling
-                beam_z_mm = floor_elevation_mm + 8000.0  # Will be refined later with actual column height
+                # Default: place at floor level
+                beam_z_mm = floor_elevation_mm
 
-            # Set placement at beam midpoint
-            # Beam is placed at its center, then rotated
+            # Set placement at beam START point (not midpoint)
+            # The beam extrudes along +X from the placement point
+            # So we place at the start and let it extrude to the end
             cos_a = math.cos(angle)
             sin_a = math.sin(angle)
 
             matrix = [
-                [cos_a, -sin_a, 0.0, mid_x / 1000.0],
-                [sin_a, cos_a, 0.0, mid_y / 1000.0],
+                [cos_a, -sin_a, 0.0, start_x / 1000.0],
+                [sin_a, cos_a, 0.0, start_y / 1000.0],
                 [0.0, 0.0, 1.0, beam_z_mm / 1000.0],  # Place at ceiling height
             ]
 
@@ -744,12 +744,13 @@ class IFCGenerator:
 
         # Create rectangular profile for beam cross-section in YZ plane
         # Profile is centered at origin, facing along X-axis
+        # For horizontal beam: XDim = depth (vertical), YDim = width (horizontal)
         profile = self.ifc_file.createIfcRectangleProfileDef(
             "AREA",      # Profile type
             None,        # Profile name
             None,        # Position (will use placement below)
-            width_m,     # XDim - beam width (horizontal, maps to Y in final orientation)
-            depth_m      # YDim - beam depth (vertical, maps to Z in final orientation)
+            depth_m,     # XDim - beam depth (vertical in cross-section)
+            width_m      # YDim - beam width (horizontal in cross-section)
         )
 
         # Extrude along positive X-axis (horizontally along beam length)
@@ -947,10 +948,11 @@ class IFCGenerator:
         # Extrude DOWNWARD along negative Z-axis (into ground)
         extrusion_direction = self.ifc_file.createIfcDirection((0.0, 0.0, -1.0))
 
-        # Placement at origin with Z-axis down
+        # Placement at origin with standard Z-axis UP (not down!)
+        # The extrusion_direction handles the downward direction
         placement = self.ifc_file.createIfcAxis2Placement3D(
             self.ifc_file.createIfcCartesianPoint((0.0, 0.0, 0.0)),
-            self.ifc_file.createIfcDirection((0.0, 0.0, -1.0)),  # Z-axis down (extrusion direction)
+            self.ifc_file.createIfcDirection((0.0, 0.0, 1.0)),   # Z-axis UP (standard)
             self.ifc_file.createIfcDirection((1.0, 0.0, 0.0))    # X-axis forward
         )
 
